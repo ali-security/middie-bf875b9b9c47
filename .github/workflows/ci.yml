@@ -1,23 +1,97 @@
 name: CI
 
 on:
-  push:
-    branches:
-     - main
-     - master
-     - next
-     - 'v*'
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Space-separated test files to run instead of the full suite.'
+        required: false
+        default: ''
+        type: string
 
+# The test job below is fastify/workflows/.github/workflows/plugins-ci.yml@v3's
+# `test` job, inlined verbatim (same matrix, same steps): a reusable-workflow
+# call cannot carry `timeout-minutes` and lives in another repository, so it
+# cannot be made fork-dispatchable. The `license-check` / `lint` jobs that the
+# caller enabled are gates, not tests, and are dropped for the same reason
+# `standard` and `tsd` are peeled off the `npm test` chain below.
 jobs:
   test:
-    uses: fastify/workflows/.github/workflows/plugins-ci.yml@v3
-    with:
-      license-check: true
-      lint: true
+    name: Test
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [14, 16, 18, 20, 21]
+        os: [macos-latest, ubuntu-latest, windows-latest]
+        exclude:
+          - os: windows-latest
+            node-version: 14
+          - os: macos-latest
+            node-version: 14
+          - os: macos-latest
+            node-version: 16
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Pin the registry to the release date
+        shell: bash
+        run: |
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken=2024-09-13T04:03:39.112000Z
+
+      - name: Install dependencies
+        run: npm i --ignore-scripts
+
+      - name: Run tests
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            npx tap ${{ inputs.test-filter }}
+          else
+            npm run test:unit
+          fi
+
+  pack:
+    name: Pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # 22.6.0 bundles npm 10.8.2 — the runtime and npm that packed the
+      # published tarball, so `npm pack`'s member set matches it.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.6.0
+
+      - name: Pack
+        shell: bash
+        run: |
+          TARBALL=$(npm pack --ignore-scripts | tail -n 1)
+          mv "$TARBALL" "middie-$(node -p "require('./package.json').version").tgz"
+          ls -l middie-*.tgz
+
+      - name: Upload package tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball
+          path: middie-*.tgz
+          if-no-files-found: error
