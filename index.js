@@ -28,7 +28,7 @@ function fastifyMiddie (fastify, options, next) {
   fastify.decorate('use', use)
   fastify[kMiddlewares] = []
   fastify[kMiddieHasMiddlewares] = false
-  fastify[kMiddie] = Middie(onMiddieEnd)
+  fastify[kMiddie] = Middie(onMiddieEnd, getRouterOptions(fastify))
 
   const hook = options.hook || 'onRequest'
 
@@ -87,7 +87,7 @@ function fastifyMiddie (fastify, options, next) {
   function onRegister (instance) {
     const middlewares = instance[kMiddlewares].slice()
     instance[kMiddlewares] = []
-    instance[kMiddie] = Middie(onMiddieEnd)
+    instance[kMiddie] = Middie(onMiddieEnd, getRouterOptions(instance))
     instance[kMiddieHasMiddlewares] = false
     instance.decorate('use', use)
     for (const middleware of middlewares) {
@@ -96,6 +96,20 @@ function fastifyMiddie (fastify, options, next) {
   }
 
   next()
+}
+
+// The middleware prefixes must be matched against the same normalized path the
+// router uses, so the engine needs the very same router options.
+// Fastify v5 groups them under `initialConfig.routerOptions`, while Fastify v4
+// exposes them as top level `initialConfig` keys.
+function getRouterOptions (instance) {
+  const initialConfig = instance.initialConfig || {}
+  const routerOptions = initialConfig.routerOptions || initialConfig
+  return {
+    ignoreDuplicateSlashes: routerOptions.ignoreDuplicateSlashes,
+    useSemicolonDelimiter: routerOptions.useSemicolonDelimiter,
+    ignoreTrailingSlash: routerOptions.ignoreTrailingSlash
+  }
 }
 
 module.exports = fp(fastifyMiddie, {
