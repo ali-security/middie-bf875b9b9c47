@@ -90,8 +90,20 @@ function fastifyMiddie (fastify, options, next) {
     instance[kMiddie] = Middie(onMiddieEnd, getRouterOptions(instance))
     instance[kMiddieHasMiddlewares] = false
     instance.decorate('use', use)
-    for (const middleware of middlewares) {
-      instance.use(...middleware)
+    // The inherited middlewares already carry the prefix of the scope they were
+    // registered on, so they must be re-registered as they are. Going through
+    // the public `use` would prepend the prefix of the new scope a second time
+    // (an inherited `use('/admin')` guard would move to `/admin/admin`), which
+    // stops it from running for the routes of a child scope registered with
+    // that very same prefix.
+    for (const [path, fn] of middlewares) {
+      instance[kMiddlewares].push([path, fn])
+      if (fn == null) {
+        instance[kMiddie].use(path)
+      } else {
+        instance[kMiddie].use(path, fn)
+      }
+      instance[kMiddieHasMiddlewares] = true
     }
   }
 

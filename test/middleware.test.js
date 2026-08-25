@@ -501,3 +501,355 @@ test('middlewares should run in the order in which they are defined', t => {
     t.same(JSON.parse(res.payload), { hello: 'world' })
   })
 })
+
+// The `onRegister` hook re-registers the inherited middlewares on the new scope.
+// Doing that through the public `use` prepends the prefix of the new scope to a
+// path that already carries the prefix of the scope it was registered on, so an
+// inherited `use('/admin')` guard moved to `/admin/admin` and stopped running
+// for the routes of a child scope registered with the `/admin` prefix.
+test('should not double-prefix inherited middleware paths in child scopes', async t => {
+  t.plan(4)
+
+  const instance = fastify()
+  t.teardown(() => instance.close())
+
+  instance.register(middiePlugin)
+    .after(() => {
+      instance.use('/admin', function (req, res, next) {
+        if (req.headers.authorization == null) {
+          res.statusCode = 403
+          res.end('forbidden')
+          return
+        }
+
+        next()
+      })
+    })
+
+  instance.get('/admin/root-data', async function () {
+    return { data: 'root-secret' }
+  })
+
+  instance.register(function (child, opts, next) {
+    child.get('/secret', async function () {
+      return { data: 'child-secret' }
+    })
+
+    next()
+  }, { prefix: '/admin' })
+
+  const rootNoAuth = await instance.inject({ method: 'GET', url: '/admin/root-data' })
+  t.equal(rootNoAuth.statusCode, 403)
+
+  const childNoAuth = await instance.inject({ method: 'GET', url: '/admin/secret' })
+  t.equal(childNoAuth.statusCode, 403)
+
+  const childWithAuth = await instance.inject({
+    method: 'GET',
+    url: '/admin/secret',
+    headers: { authorization: 'Bearer test' }
+  })
+
+  t.equal(childWithAuth.statusCode, 200)
+  t.same(JSON.parse(childWithAuth.payload), { data: 'child-secret' })
+})
+
+test('should allow child scopes register middleware with same prefix', async t => {
+  t.plan(7)
+
+  const instance = fastify()
+  t.teardown(() => instance.close())
+
+  const count = { admin: 0, child: 0 }
+
+  instance.register(middiePlugin)
+    .after(() => {
+      instance.use('/admin', function (req, res, next) {
+        count.admin++
+        next()
+      })
+    })
+
+  instance.get('/admin/root-data', async function () {
+    return { data: 'admin' }
+  })
+
+  instance.register(function (child, opts, next) {
+    child.use('/admin', function (req, res, next) {
+      count.child++
+      next()
+    })
+
+    child.get('/secret', async function () {
+      return { data: 'child' }
+    })
+
+    child.get('/admin', async function () {
+      return { data: 'child-admin' }
+    })
+
+    next()
+  }, { prefix: '/admin' })
+
+  const root = await instance.inject({ method: 'GET', url: '/admin/root-data' })
+  t.equal(root.statusCode, 200)
+  t.same(JSON.parse(root.payload), { data: 'admin' })
+
+  const child = await instance.inject({ method: 'GET', url: '/admin/secret' })
+  t.equal(child.statusCode, 200)
+  t.same(JSON.parse(child.payload), { data: 'child' })
+
+  const childAdmin = await instance.inject({ method: 'GET', url: '/admin/admin' })
+  t.equal(childAdmin.statusCode, 200)
+  t.same(JSON.parse(childAdmin.payload), { data: 'child-admin' })
+
+  t.same(count, { admin: 3, child: 1 })
+})
+
+test('should enforce inherited middleware in nested grandchild scopes', async t => {
+  t.plan(6)
+
+  const instance = fastify()
+  t.teardown(() => instance.close())
+
+  instance.register(middiePlugin)
+    .after(() => {
+      instance.use('/admin', function (req, res, next) {
+        if (req.headers.authorization == null) {
+          res.statusCode = 403
+          res.end('forbidden')
+          return
+        }
+
+        next()
+      })
+    })
+
+  instance.get('/admin/root-data', async function () {
+    return { data: 'root-secret' }
+  })
+
+  instance.register(function (parent, opts, next) {
+    parent.get('/info', async function () {
+      return { data: 'parent-info' }
+    })
+
+    parent.register(function (grandchild, opts, next) {
+      grandchild.get('/deep', async function () {
+        return { data: 'nested-secret' }
+      })
+
+      next()
+    }, { prefix: '/sub' })
+
+    next()
+  }, { prefix: '/admin' })
+
+  const rootNoAuth = await instance.inject({ method: 'GET', url: '/admin/root-data' })
+  t.equal(rootNoAuth.statusCode, 403)
+
+  const parentNoAuth = await instance.inject({ method: 'GET', url: '/admin/info' })
+  t.equal(parentNoAuth.statusCode, 403)
+
+  const grandchildNoAuth = await instance.inject({ method: 'GET', url: '/admin/sub/deep' })
+  t.equal(grandchildNoAuth.statusCode, 403)
+
+  const grandchildWithAuth = await instance.inject({
+    method: 'GET',
+    url: '/admin/sub/deep',
+    headers: { authorization: 'Bearer test' }
+  })
+  t.equal(grandchildWithAuth.statusCode, 200)
+  t.same(JSON.parse(grandchildWithAuth.payload), { data: 'nested-secret' })
+
+  const parentWithAuth = await instance.inject({
+    method: 'GET',
+    url: '/admin/info',
+    headers: { authorization: 'Bearer test' }
+  })
+  t.equal(parentWithAuth.statusCode, 200)
+})
+
+test('should enforce inherited middleware across three nesting levels', async t => {
+  t.plan(3)
+
+  const instance = fastify()
+  t.teardown(() => instance.close())
+
+  instance.register(middiePlugin)
+    .after(() => {
+      instance.use('/api', function (req, res, next) {
+        if (req.headers.authorization == null) {
+          res.statusCode = 403
+          res.end('forbidden')
+          return
+        }
+
+        next()
+      })
+    })
+
+  instance.register(function (l1, opts, next) {
+    l1.register(function (l2, opts, next) {
+      l2.register(function (l3, opts, next) {
+        l3.get('/resource', async function () {
+          return { data: 'deep-resource' }
+        })
+
+        next()
+      }, { prefix: '/c' })
+
+      next()
+    }, { prefix: '/b' })
+
+    next()
+  }, { prefix: '/api/a' })
+
+  const noAuth = await instance.inject({ method: 'GET', url: '/api/a/b/c/resource' })
+  t.equal(noAuth.statusCode, 403)
+
+  const withAuth = await instance.inject({
+    method: 'GET',
+    url: '/api/a/b/c/resource',
+    headers: { authorization: 'Bearer test' }
+  })
+  t.equal(withAuth.statusCode, 200)
+  t.same(JSON.parse(withAuth.payload), { data: 'deep-resource' })
+})
+
+test('should not apply middleware to unrelated nested prefixes', async t => {
+  t.plan(4)
+
+  const instance = fastify()
+  t.teardown(() => instance.close())
+
+  instance.register(middiePlugin)
+    .after(() => {
+      instance.use('/admin', function (req, res, next) {
+        if (req.headers.authorization == null) {
+          res.statusCode = 403
+          res.end('forbidden')
+          return
+        }
+
+        next()
+      })
+    })
+
+  instance.register(function (child, opts, next) {
+    child.get('/data', async function () {
+      return { data: 'public' }
+    })
+
+    child.register(function (grandchild, opts, next) {
+      grandchild.get('/info', async function () {
+        return { data: 'public-nested' }
+      })
+
+      next()
+    }, { prefix: '/nested' })
+
+    next()
+  }, { prefix: '/public' })
+
+  const publicData = await instance.inject({ method: 'GET', url: '/public/data' })
+  t.equal(publicData.statusCode, 200)
+  t.same(JSON.parse(publicData.payload), { data: 'public' })
+
+  const publicNested = await instance.inject({ method: 'GET', url: '/public/nested/info' })
+  t.equal(publicNested.statusCode, 200)
+  t.same(JSON.parse(publicNested.payload), { data: 'public-nested' })
+})
+
+test('should not apply middleware when prefix shares string prefix but not path segment', async t => {
+  t.plan(4)
+
+  const instance = fastify()
+  t.teardown(() => instance.close())
+
+  instance.register(middiePlugin)
+    .after(() => {
+      instance.use('/admin', function (req, res, next) {
+        if (req.headers.authorization == null) {
+          res.statusCode = 403
+          res.end('forbidden')
+          return
+        }
+
+        next()
+      })
+    })
+
+  instance.register(function (child, opts, next) {
+    child.get('/settings', async function () {
+      return { data: 'panel-settings' }
+    })
+
+    next()
+  }, { prefix: '/admin-panel' })
+
+  instance.register(function (child, opts, next) {
+    child.get('/settings', async function () {
+      return { data: 'admin-settings' }
+    })
+
+    next()
+  }, { prefix: '/admin/real' })
+
+  const panelNoAuth = await instance.inject({ method: 'GET', url: '/admin-panel/settings' })
+  t.equal(panelNoAuth.statusCode, 200)
+  t.same(JSON.parse(panelNoAuth.payload), { data: 'panel-settings' })
+
+  const realNoAuth = await instance.inject({ method: 'GET', url: '/admin/real/settings' })
+  t.equal(realNoAuth.statusCode, 403)
+
+  const realWithAuth = await instance.inject({
+    method: 'GET',
+    url: '/admin/real/settings',
+    headers: { authorization: 'Bearer test' }
+  })
+  t.equal(realWithAuth.statusCode, 200)
+})
+
+test('should enforce middleware with partial prefix overlap in nested scopes', async t => {
+  t.plan(3)
+
+  const instance = fastify()
+  t.teardown(() => instance.close())
+
+  instance.register(middiePlugin)
+    .after(() => {
+      instance.use('/admin', function (req, res, next) {
+        if (req.headers.authorization == null) {
+          res.statusCode = 403
+          res.end('forbidden')
+          return
+        }
+
+        next()
+      })
+    })
+
+  instance.register(function (child, opts, next) {
+    child.register(function (grandchild, opts, next) {
+      grandchild.get('/settings', async function () {
+        return { data: 'admin-settings' }
+      })
+
+      next()
+    }, { prefix: '/panel' })
+
+    next()
+  }, { prefix: '/admin' })
+
+  const noAuth = await instance.inject({ method: 'GET', url: '/admin/panel/settings' })
+  t.equal(noAuth.statusCode, 403)
+
+  const withAuth = await instance.inject({
+    method: 'GET',
+    url: '/admin/panel/settings',
+    headers: { authorization: 'Bearer test' }
+  })
+  t.equal(withAuth.statusCode, 200)
+  t.same(JSON.parse(withAuth.payload), { data: 'admin-settings' })
+})
